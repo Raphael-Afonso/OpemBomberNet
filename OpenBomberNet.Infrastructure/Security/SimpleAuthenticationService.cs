@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using OpenBomberNet.Application.Interfaces;
 using System;
 using System.Text;
@@ -8,8 +9,14 @@ namespace OpenBomberNet.Infrastructure.Security;
 // Para um ambiente real, use bibliotecas robustas como JWT (JSON Web Tokens).
 public class SimpleAuthenticationService : IAuthenticationService
 {
+    private readonly ILogger<SimpleAuthenticationService> _logger;
     // Chave secreta muito simples (NÃO FAÇA ISSO EM PRODUÇÃO)
     private const string SecretKey = "YourSuperSecretKeyHere!";
+
+    public SimpleAuthenticationService(ILogger<SimpleAuthenticationService> logger)
+    {
+        _logger = logger;
+    }
 
     public string GenerateToken(Guid playerId, string nickname)
     {
@@ -18,6 +25,7 @@ public class SimpleAuthenticationService : IAuthenticationService
         byte[] bytesToEncode = Encoding.UTF8.GetBytes(dataToEncode);
 
         // Codifica em Base64 (não é criptografia, apenas codificação)
+        _logger.LogDebug("Generated simple token for PlayerId {PlayerId}", playerId);
         return Convert.ToBase64String(bytesToEncode);
     }
 
@@ -29,29 +37,38 @@ public class SimpleAuthenticationService : IAuthenticationService
             string decodedData = Encoding.UTF8.GetString(decodedBytes);
 
             // Separa os dados e a chave secreta
-            string[] parts = decodedData.Split('|');
+            string[] parts = decodedData.Split("|");
 
             // Verifica se o formato está correto e se a chave secreta confere
             if (parts.Length == 3 && parts[2] == SecretKey)
             {
                 if (Guid.TryParse(parts[0], out Guid playerId))
                 {
+                    _logger.LogDebug("Simple token validation successful for PlayerId {PlayerId}", playerId);
                     return (true, playerId, parts[1]);
                 }
+                else
+                {
+                    _logger.LogWarning("Failed to parse PlayerId from token: {Token}", token);
+                }
+            }
+            else
+            {
+                 _logger.LogWarning("Token validation failed: Invalid format or secret key mismatch. Token: {Token}", token);
             }
         }
-        catch (FormatException)
+        catch (FormatException ex)
         {
-            // Token inválido (não é Base64 válido)
+            _logger.LogWarning(ex, "Token validation failed: Invalid Base64 format. Token: {Token}", token);
             return (false, null, null);
         }
         catch (Exception ex)
         {
-            // Logar o erro em um cenário real
-            Console.WriteLine($"Erro ao validar token: {ex.Message}");
+            _logger.LogError(ex, "Unexpected error during token validation. Token: {Token}", token);
             return (false, null, null);
         }
 
         return (false, null, null);
     }
 }
+

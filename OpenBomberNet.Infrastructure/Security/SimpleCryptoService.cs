@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using OpenBomberNet.Application.Interfaces;
 using System;
 using System.IO;
@@ -11,17 +12,31 @@ namespace OpenBomberNet.Infrastructure.Security;
 // Para segurança real, use AES ou outras cifras robustas com gerenciamento de chaves adequado.
 public class SimpleCryptoService : ISimpleCryptoService
 {
+    private readonly ILogger<SimpleCryptoService> _logger;
     // Chave de criptografia XOR muito simples (NÃO FAÇA ISSO EM PRODUÇÃO)
     private readonly byte[] _key = Encoding.UTF8.GetBytes("SimpleKey123!");
+
+    public SimpleCryptoService(ILogger<SimpleCryptoService> logger)
+    {
+        _logger = logger;
+    }
 
     public string Encrypt(string plainText)
     {
         if (string.IsNullOrEmpty(plainText))
             return plainText;
 
-        byte[] data = Encoding.UTF8.GetBytes(plainText);
-        byte[] encryptedData = ProcessXOR(data);
-        return Convert.ToBase64String(encryptedData);
+        try
+        {
+            byte[] data = Encoding.UTF8.GetBytes(plainText);
+            byte[] encryptedData = ProcessXOR(data);
+            return Convert.ToBase64String(encryptedData);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error during simple encryption.");
+            return string.Empty; // Return empty or throw?
+        }
     }
 
     public string Decrypt(string cipherText)
@@ -35,15 +50,14 @@ public class SimpleCryptoService : ISimpleCryptoService
             byte[] decryptedData = ProcessXOR(data);
             return Encoding.UTF8.GetString(decryptedData);
         }
-        catch (FormatException)
+        catch (FormatException ex)
         {
-            // Handle invalid Base64 string - return original or throw?
-            Console.WriteLine("Error: Invalid Base64 string during decryption.");
+            _logger.LogWarning(ex, "Error during simple decryption: Invalid Base64 string. Ciphertext (start): {CipherTextStart}", cipherText.Length > 10 ? cipherText.Substring(0, 10) : cipherText);
             return string.Empty; // Or throw specific exception
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error during decryption: {ex.Message}");
+            _logger.LogError(ex, "Error during simple decryption. Ciphertext (start): {CipherTextStart}", cipherText.Length > 10 ? cipherText.Substring(0, 10) : cipherText);
             return string.Empty; // Or throw
         }
     }
@@ -58,3 +72,4 @@ public class SimpleCryptoService : ISimpleCryptoService
         return result;
     }
 }
+

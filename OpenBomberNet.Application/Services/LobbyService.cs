@@ -1,69 +1,78 @@
+using Microsoft.Extensions.Logging;
 using OpenBomberNet.Application.DTOs;
 using OpenBomberNet.Application.Interfaces;
+using OpenBomberNet.Common; // Added using for protocol constants
 using OpenBomberNet.Domain.Entities;
-using OpenBomberNet.Domain.Interfaces; // Assuming an IPlayerRepository or similar exists
-using OpenBomberNet.Infrastructure.Networking; // Placeholder for message sending interface
+using OpenBomberNet.Domain.Interfaces;
 using System.Collections.Concurrent;
 using System.Linq;
+using System.Text;
 using System.Threading.Tasks;
 
 namespace OpenBomberNet.Application.Services;
 
 public class LobbyService : ILobbyService
 {
-    // Using ConcurrentDictionary for thread-safe access to lobby players
-    // Key: ConnectionId, Value: Player object (or a simpler DTO if preferred)
+    private readonly ILogger<LobbyService> _logger;
     private readonly ConcurrentDictionary<string, Player> _lobbyPlayers = new();
-    private readonly IMessageSender _messageSender; // Interface to send messages back to clients
-    private readonly IAuthenticationService _authService; // To potentially link auth
+    private readonly IMessageSender _messageSender;
+    private readonly IAuthenticationService _authService;
+    // private readonly IConnectionManager _connectionManager;
 
-    // Inject dependencies (MessageSender, Auth Service, potentially Player Repository)
-    public LobbyService(IMessageSender messageSender, IAuthenticationService authService)
+    public LobbyService(ILogger<LobbyService> logger, IMessageSender messageSender, IAuthenticationService authService)
     {
+        _logger = logger;
         _messageSender = messageSender;
-        _authService = authService; // Store auth service if needed later
+        _authService = authService;
     }
 
     public async Task<bool> EnterLobbyAsync(string connectionId, string nickname)
     {
-        // Basic validation
-        if (string.IsNullOrWhiteSpace(nickname) || _lobbyPlayers.ContainsKey(connectionId))
+        if (string.IsNullOrWhiteSpace(nickname))
         {
-            // Maybe send an error message back?
+            _logger.LogWarning("Attempt to enter lobby with empty nickname from connection {ConnectionId}.", connectionId);
+            await _messageSender.SendMessageAsync(connectionId, $"{ProtocolCommands.Error}{ProtocolDelimiters.Primary}Nickname cannot be empty.");
             return false;
         }
+        if (_lobbyPlayers.ContainsKey(connectionId))
+        {
+             _logger.LogWarning("Connection {ConnectionId} attempted to enter lobby multiple times.", connectionId);
+             await SendLobbyStateToPlayer(connectionId);
+             return true;
+        }
 
-        // Create a new player entity for the lobby session
-        // In a real scenario, this might link to an authenticated user account
-        var player = new Player(Guid.NewGuid(), nickname, new Domain.ValueObjects.Position(0, 0)); // Initial position doesn't matter much in lobby
+        // TODO: Get PlayerId from IConnectionManager associated during Auth step
+        var playerId = Guid.NewGuid(); // TEMPORARY
+        var player = new Player(playerId, nickname, new Domain.ValueObjects.Position(0, 0));
         player.ConnectionId = connectionId;
 
         if (_lobbyPlayers.TryAdd(connectionId, player))
         {
-            // Notify all other players that a new player joined
-            var joinMessage = $"LOBBY_JOIN|{player.Id}|{player.Nickname}"; // Example message format
+            _logger.LogInformation("Player {Nickname} ({PlayerId}) using connection {ConnectionId} entered lobby.", player.Nickname, player.Id, connectionId);
+
+            var joinMessage = $"{ProtocolCommands.LobbyJoin}{ProtocolDelimiters.Primary}{player.Id}{ProtocolDelimiters.Primary}{player.Nickname}";
             await BroadcastToOthersAsync(connectionId, joinMessage);
-
-            // Send current lobby state to the new player
-            var playersInLobby = await GetPlayersInLobbyAsync();
-            var lobbyStateMessage = "LOBBY_STATE|" + string.Join(";", playersInLobby.Select(p => $"{p.Id}:{p.Nickname}"));
-            await _messageSender.SendMessageAsync(connectionId, lobbyStateMessage);
-
-            Console.WriteLine($"Player {nickname} ({connectionId}) entered lobby.");
+            await SendLobbyStateToPlayer(connectionId);
             return true;
         }
-
-        return false;
+        else
+        {
+            _logger.LogError("Failed to add player {Nickname} ({ConnectionId}) to lobby dictionary.", nickname, connectionId);
+            return false;
+        }
     }
 
     public async Task LeaveLobbyAsync(string connectionId)
     {
         if (_lobbyPlayers.TryRemove(connectionId, out Player? player))
         {
-            // Notify all remaining players that this player left
-            var leaveMessage = $"LOBBY_LEAVE|{player.Id}|{player.Nickname}";
+             _logger.LogInformation("Player {Nickname} ({PlayerId}) using connection {ConnectionId} left lobby.", player.Nickname, player.Id, connectionId);
+            var leaveMessage = $"{ProtocolCommands.LobbyLeave}{ProtocolDelimiters.Primary}{player.Id}{ProtocolDelimiters.Primary}{player.Nickname}";
             await BroadcastToAllAsync(leaveMessage);
-            Console.WriteLine($"Player {player.Nickname} ({connectionId}) left lobby.");
+        }
+        else
+        {
+            _logger.LogWarning("Attempted to remove non-existent connection {ConnectionId} from lobby.", connectionId);
         }
     }
 
@@ -71,15 +80,13 @@ public class LobbyService : ILobbyService
     {
         if (_lobbyPlayers.TryGetValue(senderConnectionId, out Player? sender))
         {
-            // Format the chat message (e.g., LOBBY_MSG|PlayerId|Nickname|MessageText)
-            var chatMessage = $"LOBBY_MSG|{sender.Id}|{sender.Nickname}|{message}";
+            var chatMessage = $"{ProtocolCommands.LobbyMessageBroadcast}{ProtocolDelimiters.Primary}{sender.Id}{ProtocolDelimiters.Primary}{sender.Nickname}{ProtocolDelimiters.Primary}{message}";
             await BroadcastToOthersAsync(senderConnectionId, chatMessage);
-            Console.WriteLine($"Lobby chat from {sender.Nickname}: {message}");
+            _logger.LogInformation("Lobby chat from {Nickname} ({PlayerId}): {Message}", sender.Nickname, sender.Id, message);
         }
         else
         {
-            // Handle case where sender is not found (should not happen ideally)
-            Console.WriteLine($"Warning: Chat message received from unknown connection {senderConnectionId}");
+            _logger.LogWarning("Chat message received from unknown connection {ConnectionId}", senderConnectionId);
         }
     }
 
@@ -89,14 +96,21 @@ public class LobbyService : ILobbyService
         return Task.FromResult<IEnumerable<PlayerLobbyDto>>(players);
     }
 
-    // Helper to broadcast to all players in the lobby
+    private async Task SendLobbyStateToPlayer(string connectionId)
+    {
+         var playersInLobby = await GetPlayersInLobbyAsync();
+         // Format: LOBBY_STATE|PlayerId1:Nickname1;PlayerId2:Nickname2;...
+         var lobbyPayload = string.Join(ProtocolDelimiters.Secondary, playersInLobby.Select(p => $"{p.Id}{ProtocolDelimiters.Tertiary}{p.Nickname}"));
+         var lobbyStateMessage = $"{ProtocolCommands.LobbyState}{ProtocolDelimiters.Primary}{lobbyPayload}";
+         await _messageSender.SendMessageAsync(connectionId, lobbyStateMessage);
+    }
+
     private async Task BroadcastToAllAsync(string message)
     {
         var tasks = _lobbyPlayers.Keys.Select(connId => _messageSender.SendMessageAsync(connId, message));
         await Task.WhenAll(tasks);
     }
 
-    // Helper to broadcast to all players EXCEPT the sender
     private async Task BroadcastToOthersAsync(string senderConnectionId, string message)
     {
         var tasks = _lobbyPlayers.Keys
@@ -106,14 +120,3 @@ public class LobbyService : ILobbyService
     }
 }
 
-// Define a placeholder interface for sending messages (to be implemented in Infrastructure)
-// This decouples the Application layer from the specific networking implementation.
-namespace OpenBomberNet.Infrastructure.Networking
-{
-    public interface IMessageSender
-    {
-        Task SendMessageAsync(string connectionId, string message);
-        Task SendMessageToAllAsync(string message);
-        Task SendMessageToAllExceptAsync(string excludedConnectionId, string message);
-    }
-}

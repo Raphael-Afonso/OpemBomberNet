@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  mongo:
+    image: mongo:latest # Use the official MongoDB image
+    container_name: openbombernet-mongo
+    ports:
+      - "27017:27017" # Expose MongoDB port (optional, for external tools)
+    volumes:
+      - mongodb_data:/data/db # Persist MongoDB data
+    restart: unless-stopped
+
+  server:
+    build:
+      context: .
+      dockerfile: OpenBomberNet.Server/Dockerfile # Path to the Dockerfile
+    container_name: openbombernet-server
+    depends_on:
+      - mongo # Ensure mongo starts before the server
+    ports:
+      - "8888:8888" # Expose the server port defined in Dockerfile/Program.cs
+    environment:
+      # Pass the MongoDB connection string to the server application
+      # The hostname 'mongo' refers to the service name defined above
+      - MongoDbSettings__ConnectionString=mongodb://mongo:27017
+      - MongoDbSettings__DatabaseName=OpenBomberNetDb
+      # Add other environment variables if needed (e.g., logging levels)
+      - Logging__LogLevel__Default=Information
+      - Logging__LogLevel__Microsoft=Warning
+      - Logging__LogLevel__Microsoft.Hosting.Lifetime=Information
+    restart: unless-stopped
+
+volumes:
+  mongodb_data: # Define the named volume for persistence
+
